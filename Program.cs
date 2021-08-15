@@ -1,4 +1,5 @@
 ﻿using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -12,15 +13,19 @@ namespace vftablechecker
 
         private class SearchDef
         {
-            public (string name, List<(string unityVersion, uint offset)> results)[] methods;
+            public (string name, uint offset)[] alternativeVFTables;
+            public (string name, List<(string unityVersion, uint offset)>[] platforms)[] methods;
 
-            public SearchDef(params string[] methods)
+            public SearchDef((string name, uint offset)[] alternativeVFTables, params string[] methods)
             {
-                this.methods = new (string, List<(string, uint)>)[methods.Length];
+                this.alternativeVFTables = alternativeVFTables;
+                this.methods = new (string, List<(string, uint)>[])[methods.Length];
                 for (int i = 0; i < this.methods.Length; ++i)
                 {
                     this.methods[i].name = methods[i];
-                    this.methods[i].results = new List<(string, uint)>();
+                    this.methods[i].platforms = new List<(string, uint)>[archs.Length];
+                    for (int j = 0; j < archs.Length; ++j)
+                        this.methods[i].platforms[j] = new List<(string, uint)>();
                 }
             }
         }
@@ -65,11 +70,6 @@ namespace vftablechecker
 
 
 
-        private static Dictionary<string, SearchDef> searchs = new Dictionary<string, SearchDef> {
-            { "GfxDeviceClient", new SearchDef("SendVRDeviceEvent") },
-            { "VRDevice", new SearchDef("BeforeRendering", "Update", "GetActiveEyeTexture", "ResolveColorAndDepthToEyeTextures", "AfterRendering", "PostPresent", "GetEyeTextureDimension", "GetProjectionMatrix") }
-        };
-
 
 
 
@@ -87,6 +87,14 @@ namespace vftablechecker
                 (new [] { "2017.2.0" }            , ("win64_nondevelopment_mono/UnityPlayer.dll", "win64_nondevelopment_mono/UnityPlayer_Win32_x64.pdb")),
                 (new [] { "2017.1.0" }            , ("win64_nondevelopment_mono/UnityPlayer.dll", "win64_nondevelopment_mono/UnityPlayer_Win32_x64_mono.pdb")),
                 (new string[0]                    , ("win64_nondevelopment_mono/player_win.exe" , "win64_nondevelopment_mono/player_win.pdb"))
+            }),
+
+            ("il2cpp x64 nondev", new [] { "Il2Cpp", "X64" }, new [] {
+                (new [] { "2018.3.0", "2019.1.0" }, ("win64_nondevelopment_il2cpp/UnityPlayer.dll", "win64_nondevelopment_il2cpp/UnityPlayer_Win64_il2cpp_x64.pdb")),
+                (new [] { "2018.2.0" }            , ("win64_nondevelopment_il2cpp/UnityPlayer.dll", "win64_nondevelopment_il2cpp/UnityPlayer_Win32_x64_il2cpp.pdb")),
+                (new [] { "2017.2.0" }            , ("win64_nondevelopment_il2cpp/UnityPlayer.dll", "win64_nondevelopment_il2cpp/UnityPlayer_Win32_x64.pdb")),
+                (new [] { "2017.1.0" }            , ("win64_nondevelopment_il2cpp/UnityPlayer.dll", "win64_nondevelopment_il2cpp/UnityPlayer_Win32_x64_il2cpp.pdb")),
+                (new string[0]                    , ("win64_nondevelopment_il2cpp/player_win.exe" , "win64_nondevelopment_il2cpp/player_win.pdb"))
             }),
 
             /*
@@ -108,7 +116,15 @@ namespace vftablechecker
             //("mono x86 dev", "win32_development_mono/UnityPlayer.dll"),
         };
 
-        private static readonly string targetDirectory = @"/mnt/c/Users/Hugo/Downloads/UDGB-master/UDGB-master/Output/Debug/tmp";
+        /*
+        private static Dictionary<string, SearchDef> searchs = new Dictionary<string, SearchDef> {
+            { "GfxDeviceClient", new SearchDef("SendVRDeviceEvent") },
+            { "VRDevice", new SearchDef("BeforeRendering", "Update", "GetActiveEyeTexture", "ResolveColorAndDepthToEyeTextures", "AfterRendering", "PostPresent", "GetEyeTextureDimension", "GetProjectionMatrix") }
+        };
+        */
+        private static Dictionary<string, SearchDef> searchs = new Dictionary<string, SearchDef>();
+
+        private static string sourceDirectory;
 
 
 
@@ -122,10 +138,14 @@ namespace vftablechecker
 
         static void Main(string[] args)
         {
+
+            LoadConfig();
+
+
             if (args.Length > 0)
             {
                 string version = args[0];
-                string rootpath = targetDirectory + "/" + version;
+                string rootpath = sourceDirectory + "/" + version;
 
                 for (int iArch = 0; iArch < archs.Length; ++iArch)
                 {
@@ -145,7 +165,7 @@ namespace vftablechecker
                     }
                     Console.WriteLine(version + " " + arch.name);
 
-                    CheckDump(version, pdbpath, dllpath);
+                    CheckDump(iArch, version, pdbpath, dllpath);
                 }
 
                 Console.WriteLine();
@@ -167,27 +187,21 @@ namespace vftablechecker
             {
                 UnityVersionComparer comparer = new UnityVersionComparer();
 
-                List<string> directories = Directory.GetDirectories(targetDirectory).Where(d => !d.Contains("_tmp")).ToList();
+                List<string> directories = Directory.GetDirectories(sourceDirectory).Where(d => !d.Contains("_tmp")).ToList();
                 directories.Sort(comparer);
 
-                var cache = LoadCache();
-                foreach (var vftables in searchs)
-                    if (cache.TryGetValue(vftables.Key, out var methodsCache))
-                        foreach (var searchMethod in vftables.Value.methods)
-                            if (methodsCache.TryGetValue(searchMethod.name, out var offsetsCache))
-                                foreach (var offsetCache in offsetsCache)
-                                    if (offsetCache.Value != 0)
-                                        searchMethod.results.Add((offsetCache.Key, offsetCache.Value));
+                LoadCache();
 
                 // Check versions
 
-                foreach (string rootpath in directories)
+                for (int iArch = 0; iArch < archs.Length; ++iArch)
                 {
-                    string version = rootpath.Split(Path.DirectorySeparatorChar).Last();
+                    var arch = archs[iArch];
 
-                    for (int iArch = 0; iArch < archs.Length; ++iArch)
+                    foreach (string rootpath in directories)
                     {
-                        var arch = archs[iArch];
+                        string version = rootpath.Split(Path.DirectorySeparatorChar).Last();
+
 
                         var paths = arch.paths.First(v => IsUnityVersionOverOrEqual(version, v.unityminversions)).paths;
                         string dllpath = rootpath + "/" + paths.dll;
@@ -210,16 +224,18 @@ namespace vftablechecker
                             foreach (var method in search.methods)
                             {
                                 bool hasValidResult = false;
-                                foreach (var result in method.results)
+                                foreach (var result in method.platforms[iArch])
                                 {
                                     if (result.unityVersion == version)
                                     {
                                         hasValidResult = result.offset != 0;
-                                        break;
+                                        if (!hasValidResult)
+                                            break;
                                     }
                                 }
                                 if (!hasValidResult)
                                 {
+                                    Console.WriteLine("missing " + method.name);
                                     needsCheck = true;
                                     break;
                                 }
@@ -231,7 +247,7 @@ namespace vftablechecker
                         {
                             Console.WriteLine(version + " " + arch.name);
 
-                            CheckDump(version, pdbpath, dllpath);
+                            CheckDump(iArch, version, pdbpath, dllpath);
                         }
                         else
                             Console.WriteLine(version + " " + arch.name + " - DISCARTED");
@@ -245,7 +261,8 @@ namespace vftablechecker
                 UnityVersionOffsetComparer uvoc = new UnityVersionOffsetComparer();
                 foreach (KeyValuePair<string, SearchDef> search in searchs)
                     foreach (var method in search.Value.methods)
-                        method.results.Sort(uvoc);
+                        foreach (var platform in method.platforms)
+                            platform.Sort(uvoc);
 
                 // Final output
 
@@ -262,97 +279,140 @@ namespace vftablechecker
                         else
                             Console.WriteLine("    ");
 
-                        List<string> lineCache = new List<string>();
+                        Console.WriteLine($"    #region {method.name}_vftableoffset values");
 
-                        uint lastOffset = method.results[0].offset;
-                        string lastUV = method.results[0].unityVersion;
-                        List<string> lastUVs = new List<string>();
-                        lastUVs.Add(lastUV);
-                        for (int i = 1; i < method.results.Count; ++i)
+                        for (int iPlatform = 0; iPlatform < method.platforms.Length; ++iPlatform)
                         {
-                            if (method.results[i].offset != lastOffset)
+                            var results = method.platforms[iPlatform];
+                            string flags = string.Join(" | ", archs[iPlatform].flags.Select(flag => "NativeSignatureFlags." + flag));
+
+                            Console.WriteLine("    // " + archs[iPlatform].name);
+
+                            List<string> lineCache = new List<string>();
+
+                            uint lastOffset = results[0].offset;
+                            string lastUV = results[0].unityVersion;
+                            List<string> lastUVs = new List<string>();
+                            lastUVs.Add(lastUV);
+                            for (int i = 1; i < results.Count; ++i)
                             {
-                                lineCache.Add($"    [NativeFieldValue(NativeSignatureFlags.X64, {lastOffset}, {string.Join(", ", lastUVs.Select(uv => $"\"{uv}\""))})]");
-                                lastOffset = method.results[i].offset;
-                                lastUVs.Clear();
-                                lastUVs.Add(lastUV = method.results[i].unityVersion);
+                                var result = results[i];
+                                if (result.offset != lastOffset)
+                                {
+                                    lineCache.Add($"    [NativeFieldValue({flags}, {lastOffset}, {string.Join(", ", lastUVs.Select(uv => $"\"{uv}\""))})]");
+                                    lastOffset = result.offset;
+                                    lastUVs.Clear();
+                                    lastUVs.Add(lastUV = result.unityVersion);
+                                }
+                                else if (!IsUnityVersionOverOrEqual(result.unityVersion, lastUV))
+                                {
+                                    lastUV = result.unityVersion;
+                                    lastUVs.Add(lastUV);
+                                }
                             }
-                            else if (!IsUnityVersionOverOrEqual(method.results[i].unityVersion, lastUV))
-                            {
-                                lastUV = method.results[i].unityVersion;
-                                lastUVs.Add(lastUV);
-                            }
+                            Console.WriteLine($"    [NativeFieldValue({flags}, {lastOffset}, {string.Join(", ", lastUVs)})]");
+                            for (int i = lineCache.Count - 1; i >= 0; --i)
+                                Console.WriteLine(lineCache[i]);
                         }
-                        Console.WriteLine($"    [NativeFieldValue(NativeSignatureFlags.X64, {lastOffset}, {string.Join(", ", lastUVs)})]");
-                        foreach (string line in lineCache)
-                            Console.WriteLine(line);
+
+                        Console.WriteLine("    #endregion");
                         Console.WriteLine($"    public static uint {method.name};");
                     }
 
                     Console.WriteLine("}");
                 }
-
-                /*
-                Console.WriteLine();
-                foreach (KeyValuePair<string, SearchDef> search in searchs)
-                {
-                    Console.WriteLine($"internal static class {search.Key}VFTable");
-                    Console.WriteLine("{");
-
-                    for (int i = 0; i < search.Value.methods.Length; ++i)
-                    {
-                        if (i > 0)
-                            Console.WriteLine("    ");
-
-                        Dictionary<uint, List<string>> methodOffsets = search.Value.methodsOffsets[i];
-                        foreach (KeyValuePair<uint, List<string>> methodOffset in methodOffsets)
-                        {
-                            Console.WriteLine($"    [NativeFieldValue({methodOffset.Key}, {string.Join(", ", methodOffset.Value.Select(uv => $"\"{uv}\""))})]");
-                        }
-
-                        string methodName = search.Value.methods[i].name;
-                        Console.WriteLine($"    public static uint {methodName};");
-                    }
-
-                    Console.WriteLine("}");
-                }
-                Console.WriteLine();
-                */
             }
 
         }
 
-        private static Dictionary<string, Dictionary<string, Dictionary<string, uint>>> LoadCache()
+        private static void LoadConfig()
+        {
+            JObject config = JsonConvert.DeserializeObject<JObject>(File.ReadAllText("config.json"));
+            sourceDirectory = config["sourceDirectory"].ToString();
+            foreach (var searchEntry in (JObject)config["searchs"])
+            {
+                List<(string, uint)> searchAlts = new List<(string, uint)>();
+                foreach (var alt in ((JObject)searchEntry.Value)["alternativeVFTables"])
+                {
+                    JArray altData = alt as JArray;
+                    searchAlts.Add((altData[0].ToString(), altData[1].ToObject<uint>()));
+                }
+                List<string> searchMethods = new List<string>();
+                foreach (var method in ((JObject)searchEntry.Value)["methods"])
+                    searchMethods.Add(method.ToString());
+                searchs.Add(searchEntry.Key, new SearchDef(searchAlts.ToArray(), searchMethods.ToArray()));
+            }
+
+        }
+
+        private static void LoadCache()
         {
             if (!File.Exists("cache.json"))
             {
                 Console.WriteLine("No cache found.");
-                return null;
+                return;
             }
 
-            return JsonConvert.DeserializeObject<Dictionary<string, Dictionary<string, Dictionary<string, uint>>>>(File.ReadAllText("cache.json"));
+            try
+            {
+                var cache = JsonConvert.DeserializeObject<Dictionary<string, Dictionary<string, Dictionary<string, Dictionary<string, uint>>>>>(File.ReadAllText("cache.json"));
+
+                foreach (var vftables in searchs)
+                    if (cache.TryGetValue(vftables.Key, out var methodsCache))
+                        foreach (var searchMethod in vftables.Value.methods)
+                            if (methodsCache.TryGetValue(searchMethod.name, out var platformsCache))
+                                foreach (var platformCache in platformsCache)
+                                {
+                                    List<(string, uint)> results = new List<(string, uint)>();
+                                    foreach (var offsetCache in platformCache.Value)
+                                        if (offsetCache.Value != 0)
+                                            results.Add((offsetCache.Key, offsetCache.Value));
+
+                                    for (int iArch = 0; iArch < archs.Length; ++iArch)
+                                    {
+                                        if (archs[iArch].name == platformCache.Key)
+                                        {
+                                            searchMethod.platforms[iArch] = results;
+                                            break;
+                                        }
+                                    }
+
+                                }
+            }
+            catch
+            {
+                Console.Error.WriteLine("Failed to load cache. Discarding.");
+            }
         }
 
         private static void SaveToCache()
         {
-            Dictionary<string, Dictionary<string, Dictionary<string, uint>>> cache = new Dictionary<string, Dictionary<string, Dictionary<string, uint>>>();
+            Dictionary<string, Dictionary<string, Dictionary<string, Dictionary<string, uint>>>> cache = new Dictionary<string, Dictionary<string, Dictionary<string, Dictionary<string, uint>>>>();
             foreach (var entry in searchs)
             {
-                Dictionary<string, Dictionary<string, uint>> methodCache = new Dictionary<string, Dictionary<string, uint>>();
+                Dictionary<string, Dictionary<string, Dictionary<string, uint>>> methodCache = new Dictionary<string, Dictionary<string, Dictionary<string, uint>>>();
 
                 foreach (var method in entry.Value.methods)
                 {
-                    Dictionary<string, uint> offsetCache = new Dictionary<string, uint>();
-                    foreach (var offset in method.results)
-                        offsetCache.Add(offset.unityVersion, offset.offset);
+                    Dictionary<string, Dictionary<string, uint>> platformCache = new Dictionary<string, Dictionary<string, uint>>();
 
-                    methodCache.Add(method.name, offsetCache);
+                    for (int iPlatform = 0; iPlatform < method.platforms.Length; ++iPlatform)
+                    {
+                        var platform = method.platforms[iPlatform];
+                        Dictionary<string, uint> offsetCache = new Dictionary<string, uint>();
+                        foreach (var offset in platform)
+                            offsetCache.Add(offset.unityVersion, offset.offset);
+
+                        platformCache.Add(archs[iPlatform].name, offsetCache);
+                    }
+
+                    methodCache.Add(method.name, platformCache);
                 }
 
                 cache.Add(entry.Key, methodCache);
             }
 
-            File.WriteAllText("cache.json", JsonConvert.SerializeObject(cache));
+            File.WriteAllText("cache.json", JsonConvert.SerializeObject(cache, Formatting.Indented));
         }
 
         private static bool IsUnityVersionOverOrEqual(string currentversion, string[] validversions)
@@ -393,7 +453,7 @@ namespace vftablechecker
 
 
 
-        private static unsafe void CheckDump(string unityversion, string pdbfile, string dllfile)
+        private static unsafe void CheckDump(int iArch, string unityversion, string pdbfile, string dllfile)
         {
             Dictionary<string, SearchOffsets> searchoffsets = new Dictionary<string, SearchOffsets>();
             foreach (KeyValuePair<string, SearchDef> entry in searchs)
@@ -438,16 +498,16 @@ namespace vftablechecker
                     if (line.Contains($"{entry.Key}@"))
                     {
                         string split = line.Split('`')[1];
-                        if (split == $"??_7{entry.Key}@@6B@")
+                        if (split == $"??_7{entry.Key}@@6B@" || entry.Value.alternativeVFTables.Any(alt => split == $"??_7{entry.Key}@@6B{alt.name}@@@"))
                             nextSize = (searchoffsets[entry.Key], -1);
                         else
                         {
                             var methods = entry.Value.methods;
-                            for (int j = 0; j < methods.Length; ++j)
+                            for (int iMethod = 0; iMethod < methods.Length; ++iMethod)
                             {
-                                if (split.StartsWith($"?{methods[j].name}@{entry.Key}@@"))
+                                if (split.StartsWith($"?{methods[iMethod].name}@{entry.Key}@@"))
                                 {
-                                    nextSize = (searchoffsets[entry.Key], j);
+                                    nextSize = (searchoffsets[entry.Key], iMethod);
                                     break;
                                 }
                             }
@@ -480,7 +540,7 @@ namespace vftablechecker
 
                         for (int i = 0; i < searchdef.Value.methods.Length; ++i)
                         {
-                            searchdef.Value.methods[i].results.Add((unityversion, 0));
+                            searchdef.Value.methods[i].platforms[iArch].Add((unityversion, 0));
                             /*
                             if (!searchdef.Value.methodsOffsets[i].TryGetValue(0, out List<string> unityversions))
                                 searchdef.Value.methodsOffsets[i][0] = unityversions = new List<string>();
@@ -535,7 +595,7 @@ namespace vftablechecker
                     for (int i = 0; i < searchdef.Value.methods.Length; ++i)
                     {
                         (uint section, uint rva) methodoffset = searchoffsets[searchdef.Key].methodoffsets[i];
-                        var results = searchdef.Value.methods[i].results;
+                        var results = searchdef.Value.methods[i].platforms[iArch];
 
                         // Remove old result
                         for (int iResult = 0; iResult < results.Count; ++iResult)
@@ -555,7 +615,7 @@ namespace vftablechecker
                         else
                         {
                             vftables[searchdef.Key][i] = (searchdef.Value.methods[i].name, 0);
-                            searchdef.Value.methods[i].results.Add((unityversion, 0));
+                            searchdef.Value.methods[i].platforms[iArch].Add((unityversion, 0));
                         }
                     }
                 }

@@ -1,0 +1,13 @@
+{
+    "sourceDirectory": "/mnt/c/Users/Hugo/Downloads/UDGB-master/UDGB-master/Output/Debug/tmp",
+    "searchs": {
+        "GfxDeviceClient": {
+            "alternativeVFTables": [],
+            "methods": ["SendVRDeviceEvent"]
+        },
+        "VRDevice": {
+            "alternativeVFTables": [["IVRDeviceScripting", 0]],
+            "methods": ["BeforeRendering", "Update", "GetActiveEyeTexture", "ResolveColorAndDepthToEyeTextures", "AfterRendering", "PostPresent", "GetEyeTextureDimension", "GetProjectionMatrix"]
+        }
+    }
+}
